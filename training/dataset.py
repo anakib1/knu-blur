@@ -4,7 +4,8 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
-import torchvision.transforms as transforms
+import torchvision.transforms as T
+import torchvision.transforms.functional as F
 import logging
 from typing import Optional, Tuple, Dict, List
 import threading
@@ -34,23 +35,24 @@ class LaPaDataset(Dataset):
         self.prefetch_size = prefetch_size
         
         # Define transforms for images and masks
-        self.image_transform = transform or transforms.Compose([
-            transforms.Resize(self.image_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                              std=[0.229, 0.224, 0.225])
+        self.image_transform = transform or T.Compose([
+            T.Resize(self.image_size),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], 
+                       std=[0.229, 0.224, 0.225])
         ])
         
-        self.mask_transform = transforms.Compose([
-            transforms.Resize(self.image_size, interpolation=transforms.InterpolationMode.NEAREST)
+        self.mask_transform = T.Compose([
+            T.Resize(self.image_size, interpolation=T.InterpolationMode.NEAREST),
+            T.ToTensor()
         ])
         
         # Load image and label paths
         self.image_dir = self.root_dir / split / 'images'
         self.label_dir = self.root_dir / split / 'labels'
         
-        self.image_files = sorted(list(self.image_dir.glob('*.jpg')))
-        self.label_files = sorted(list(self.label_dir.glob('*.png')))
+        self.image_files = sorted(list(self.image_dir.glob('*.jpg')))[:100]
+        self.label_files = sorted(list(self.label_dir.glob('*.png')))[:100]
         
         if len(self.image_files) != len(self.label_files):
             raise ValueError(f"Number of images ({len(self.image_files)}) "
@@ -63,9 +65,8 @@ class LaPaDataset(Dataset):
         self.prefetch_thread = None
         self.stop_prefetch = False
         
-        # LaPa has 11 classes: background, skin, left eyebrow, right eyebrow, 
-        # left eye, right eye, nose, upper lip, inner mouth, lower lip, hair
-        self.num_classes = 11
+        # For binary segmentation (background vs. foreground)
+        self.num_classes = 2
         
         # Start prefetching thread
         self.start_prefetch_thread()
@@ -102,7 +103,7 @@ class LaPaDataset(Dataset):
                             self.prefetch_queue.put((current_idx, image, mask), timeout=1)
                         except Exception as e:
                             logger.warning(f"Error prefetching item {current_idx}: {e}")
-                    current_idx += 1
+                    current_idx = (current_idx + 1) % len(self)  # Cycle through dataset
                 
                 # Sleep briefly to prevent CPU spinning
                 time.sleep(0.1)
@@ -113,18 +114,17 @@ class LaPaDataset(Dataset):
     
     def _load_and_cache_item(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Load and transform a single item from disk."""
-        # Load image
-        image_path = self.image_files[idx]
-        image = Image.open(image_path).convert('RGB')
-        
-        # Load mask
-        mask_path = self.label_files[idx]
-        mask = Image.open(mask_path)
-        
-        # Apply transforms
+        # Load image using torchvision
+        image = Image.open(self.image_files[idx]).convert('RGB')
         image = self.image_transform(image)
+        
+        # Load mask using torchvision
+        mask = Image.open(self.label_files[idx])
         mask = self.mask_transform(mask)
-        mask = torch.from_numpy(np.array(mask)).long()
+        mask = mask.squeeze(0)  # Remove channel dimension
+        
+        # Convert multi-class mask to binary (0: background, 1: foreground/face)
+        mask = (mask > 0).long()  # Any non-zero class is considered foreground
         
         return image, mask
     
@@ -143,6 +143,8 @@ class LaPaDataset(Dataset):
                             oldest_idx = min(self.cache.keys())
                             del self.cache[oldest_idx]
                         self.cache[prefetch_idx] = (image, mask)
+                        if prefetch_idx == idx:
+                            return image, mask
             except Exception as e:
                 logger.warning(f"Error getting from prefetch queue: {e}")
             

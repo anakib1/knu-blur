@@ -160,8 +160,21 @@ class BackgroundBlurApp:
 
 def main():
     try:
-        logger.info("Initializing MediaPipe detector")
-        detector = MediaPipeDetector()
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--detector', type=str, default='mediapipe',
+                          choices=['mediapipe', 'torch'],
+                          help='Detector to use (mediapipe or torch)')
+        args = parser.parse_args()
+        
+        if args.detector == 'mediapipe':
+            logger.info("Initializing MediaPipe detector")
+            from detector.models.mediapipe_detector import MediaPipeDetector
+            detector = MediaPipeDetector()
+        else:
+            logger.info("Initializing PyTorch detector")
+            from detector.models.torch_detector import TorchDetector
+            detector = TorchDetector()
         
         logger.info("Creating BackgroundBlurApp")
         app = BackgroundBlurApp(detector, blur_strength=31)
